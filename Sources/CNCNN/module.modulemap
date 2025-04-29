@@ -1,0 +1,4 @@
+module CNCNN [system][extern_c] {
+    umbrella header "shims.cpp"
+    export *                                                                                          
+}   
