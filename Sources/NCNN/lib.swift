@@ -16,14 +16,21 @@ public struct NCNN {
         net != nil && option != nil
     }
 
-    init() {
+    init(withGPU gpu: Int32? = nil) {
         net = ncnn_net_create()
         option = ncnn_option_create()
 
-        ncnn_option_set_num_threads(option, 4)
-        ncnn_option_set_use_vulkan_compute(option, 1)
+        let useGPU = gpu != nil
+        assert(!useGPU || (gpu! >= 0))
+
+        ncnn_option_set_num_threads(option, useGPU ? 4 : 2)
+        ncnn_option_set_use_vulkan_compute(option, useGPU ? 1 : 0)
 
         ncnn_net_set_option(net, option)
+
+        if useGPU {
+            ncnn_net_set_vulkan_device(net, gpu!)
+        }
     }
 
     public func Release(mat: ncnn_mat_t?) {
@@ -32,10 +39,13 @@ public struct NCNN {
         }
     }
 
-    public func Release() {
+    public mutating func Release() {
         if let net, let option {
             ncnn_net_destroy(net)
             ncnn_option_destroy(option)
+
+            self.net = nil
+            self.option = nil
         }
     }
 
@@ -51,33 +61,30 @@ public struct NCNN {
         }
     }
 
-    public func CreateInput(data: [Float], shape: [Int64]) throws -> ncnn_mat_t? {
+    public func CreateInput(data: UnsafeMutableRawPointer, shape: [Int64]) throws -> ncnn_mat_t {
         assert(net != nil)
 
         let width = Int32(shape[2])
         let height = Int32(shape[3])
         let channels = Int32(shape[1])
-        let count = data.count
+        let count = Int(shape[0] * shape[1] * shape[2] * shape[3])
 
-        var data = data
-
-        return try data.withUnsafeMutableBytes { ptr in
-
-            switch channels {
-            case 2:
-                return ncnn_mat_create_external_2d(width, height, ptr.baseAddress, nil)
-            case 3:
-                let mat = ncnn_mat_create_3d(width, height, channels, nil)
+        switch channels {
+        case 2:
+            return ncnn_mat_create_external_2d(width, height, data, nil)
+        case 3:
+            if let mat = ncnn_mat_create_3d(width, height, channels, nil) {
                 let _ptr = ncnn_mat_get_data(mat)
-                _ptr?.copyMemory(from: ptr.baseAddress!, byteCount: count * MemoryLayout<Float>.stride)
+                _ptr?.copyMemory(from: data, byteCount: count * MemoryLayout<Float>.stride)
                 return mat
-            default: throw ("Wrong channel count")
             }
+            throw "Failed to create Input Matrix/Tensor"
+        default: throw ("Wrong channel count")
         }
     }
 
     public func Run(
-        withInput inputs: [String: ncnn_mat_t?],
+        withInputs inputs: [String: ncnn_mat_t],
         outputNames: [String]
     ) throws -> [String: ncnn_mat_t] {
         assert(!inputs.isEmpty && !outputNames.isEmpty)
@@ -87,35 +94,40 @@ public struct NCNN {
         }
 
         let ex = ncnn_extractor_create(net)
-
         for input in inputs {
             ncnn_extractor_input(ex, input.key, input.value)
         }
 
-        var out: [ncnn_mat_t?] = Array(repeating: nil, count: outputNames.count)
-
-        outputNames.withUnsafeBytes { names in
-            _ = ncnn_extractor_extract(
-                ex,
-                names.baseAddress,
-                &out
-            )
-        }
-        assert(outputNames.count == out.count)
-
         var result: [String: ncnn_mat_t] = [:]
-        for (i, o) in out.enumerated() {
-            if let o {
-                result[outputNames[i]] = o
+        for name in outputNames {
+            var out: ncnn_mat_t?
+            ncnn_extractor_extract(ex, name, &out)
+
+            if let out {
+                result[name] = out
             }
         }
-
-        inputs.forEach {
-            ncnn_mat_destroy($1)
-        }
+        assert(outputNames.count == result.count)
 
         ncnn_extractor_destroy(ex)
         return result
+    }
+
+    public func GetData<DataType: Copyable>(
+        from mat: ncnn_mat_t,
+        into data: inout [DataType],
+        size: Int
+    ) throws {
+        assert(net != nil)
+
+        let read: UnsafeMutableRawPointer? = ncnn_mat_get_data(mat)
+        assert(read != nil)
+
+        if let outdata = read?.assumingMemoryBound(to: DataType.self) {
+            data = Array(UnsafeBufferPointer(start: outdata, count: size))
+        } else {
+            throw "Failed to type conversion!"
+        }
     }
 
     public func GetData(
@@ -140,6 +152,6 @@ public struct NCNN {
     }
 }
 
-public func MakeNCNN() -> NCNN {
-    return NCNN()
+public func MakeNCNN(withGPU gpu: Int32?) -> NCNN {
+    return NCNN(withGPU: gpu)
 }
